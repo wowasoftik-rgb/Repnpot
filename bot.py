@@ -13,7 +13,7 @@ from telegram.ext import (
     filters,
 )
 
-BOT_TOKEN = "ВСТАВЬ_СЮДА_СВОЙ_ТОКЕН"
+BOT_TOKEN = "8976399480:AAGpIrkKcLUfy5aBUHh8TMYLK2vm5kl0K1M"
 DB_PATH = "reputation.db"
 
 logging.basicConfig(level=logging.INFO)
