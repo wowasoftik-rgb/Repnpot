@@ -13,8 +13,12 @@ from telegram.ext import (
     filters,
 )
 
-BOT_TOKEN = "8976399480:AAGpIrkKcLUfy5aBUHh8TMYLK2vm5kl0K1M"
+BOT_TOKEN = "ВСТАВЬ_СЮДА_СВОЙ_ТОКЕН"
 DB_PATH = "reputation.db"
+
+# Юзернейм бота без @ — нужен для кнопки "Добавить в свой чат".
+# Посмотреть его можно у @BotFather.
+BOT_USERNAME = "Reputationalex_bot"
 
 # Telegram ID админов, которым можно ставить репутацию без ограничений.
 # Узнать свой ID можно командой /myid в этом боте.
@@ -89,7 +93,40 @@ def star_bar(score):
     return "⭐" * full + "☆" * (5 - full)
 
 
+def format_reputation(to_user_id, to_username, to_display):
+    """Собирает текст с репутацией человека — используется и в /и, и в кнопке Профиль."""
+    conn = db()
+    if to_user_id:
+        rows = conn.execute(
+            "SELECT score, review, ts FROM reputation WHERE to_user_id = ? ORDER BY ts DESC",
+            (to_user_id,)
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT score, review, ts FROM reputation WHERE to_username = ? COLLATE NOCASE ORDER BY ts DESC",
+            (to_username,)
+        ).fetchall()
+    conn.close()
+
+    if not rows:
+        return f"У {to_display} пока нет отзывов."
+
+    avg = sum(r['score'] for r in rows) / len(rows)
+    text = (
+        f"📊 Репутация {to_display}\n"
+        f"{star_bar(avg)}  {avg:.1f}/5  ({len(rows)} отзывов)\n\n"
+        f"Последние отзывы:\n"
+    )
+    for r in rows[:5]:
+        line = f"⭐ {r['score']}/5"
+        if r['review']:
+            line += f" — {r['review']}"
+        text += line + "\n"
+    return text
+
+
 REP_PATTERN = re.compile(r'^\+\s*реп\b', re.IGNORECASE)
+I_COMMAND_PATTERN = re.compile(r'^/и(?:@\S+)?(?:\s+(.*))?$', re.IGNORECASE)
 SCORE_PATTERN = re.compile(r'\b([1-5])\b')
 MENTION_PATTERN = re.compile(r'@(\w+)')
 
@@ -98,6 +135,48 @@ def score_keyboard():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(f"{i} ⭐", callback_data=f"rep|{i}") for i in range(1, 6)]
     ])
+
+
+def start_menu_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("👤 Профиль", callback_data="profile")],
+        [InlineKeyboardButton("➕ Добавить в свой чат", url=f"https://t.me/{BOT_USERNAME}?startgroup=true")],
+    ])
+
+
+def back_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("⬅️ Назад", callback_data="back_start")]
+    ])
+
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    save_user(update.effective_user)
+    text = (
+        "Привет! Я бот репутации 👋\n\n"
+        "В группе пиши +реп в ответ на сообщение человека, чтобы оценить его.\n"
+        "Посмотреть репутацию — команда /и (ответом на сообщение или /и @username).\n\n"
+        "Выбери действие:"
+    )
+    await update.effective_message.reply_text(text, reply_markup=start_menu_keyboard())
+
+
+async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user = query.from_user
+
+    if query.data == "profile":
+        text = "👤 " + format_reputation(user.id, None, user.full_name)
+        await query.edit_message_text(text, reply_markup=back_keyboard())
+    elif query.data == "back_start":
+        text = (
+            "Привет! Я бот репутации 👋\n\n"
+            "В группе пиши +реп в ответ на сообщение человека, чтобы оценить его.\n"
+            "Посмотреть репутацию — команда /и (ответом на сообщение или /и @username).\n\n"
+            "Выбери действие:"
+        )
+        await query.edit_message_text(text, reply_markup=start_menu_keyboard())
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -203,9 +282,17 @@ async def rep_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text(reply)
 
 
-async def show_rep(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """/rep — своя репутация, /rep @username — чужая, или ответом на сообщение."""
+async def show_rep_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/и — своя репутация, /и @username — чужая, или ответом на сообщение."""
     message = update.effective_message
+    if not message or not message.text:
+        return
+
+    m = I_COMMAND_PATTERN.match(message.text.strip())
+    if not m:
+        return
+
+    args_str = (m.group(1) or "").strip()
 
     to_user_id = None
     to_username = None
@@ -215,43 +302,15 @@ async def show_rep(update: Update, context: ContextTypes.DEFAULT_TYPE):
         target = message.reply_to_message.from_user
         to_user_id = target.id
         to_display = target.full_name
-    elif context.args:
-        arg = context.args[0].lstrip('@')
+    elif args_str:
+        arg = args_str.split()[0].lstrip('@')
         to_username = arg
         to_display = f"@{arg}"
     else:
         to_user_id = update.effective_user.id
         to_display = update.effective_user.full_name
 
-    conn = db()
-    if to_user_id:
-        rows = conn.execute(
-            "SELECT score, review, ts FROM reputation WHERE to_user_id = ? ORDER BY ts DESC",
-            (to_user_id,)
-        ).fetchall()
-    else:
-        rows = conn.execute(
-            "SELECT score, review, ts FROM reputation WHERE to_username = ? COLLATE NOCASE ORDER BY ts DESC",
-            (to_username,)
-        ).fetchall()
-    conn.close()
-
-    if not rows:
-        await message.reply_text(f"У {to_display} пока нет отзывов.")
-        return
-
-    avg = sum(r['score'] for r in rows) / len(rows)
-    text = (
-        f"📊 Репутация {to_display}\n"
-        f"{star_bar(avg)}  {avg:.1f}/5  ({len(rows)} отзывов)\n\n"
-        f"Последние отзывы:\n"
-    )
-    for r in rows[:5]:
-        line = f"⭐ {r['score']}/5"
-        if r['review']:
-            line += f" — {r['review']}"
-        text += line + "\n"
-
+    text = format_reputation(to_user_id, to_username, to_display)
     await message.reply_text(text)
 
 
@@ -321,10 +380,13 @@ async def admin_setrep(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     init_db()
     app = ApplicationBuilder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("rep", show_rep))
+    app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("addrep", admin_setrep))
     app.add_handler(CommandHandler("myid", myid))
     app.add_handler(CallbackQueryHandler(rep_callback, pattern=r"^rep\|"))
+    app.add_handler(CallbackQueryHandler(menu_callback, pattern=r"^(profile|back_start)$"))
+    # Регистрируем ДО handle_message, чтобы "/и" не улетал в обработчик +реп.
+    app.add_handler(MessageHandler(filters.Regex(r'(?i)^/и'), show_rep_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     logger.info("Бот запущен")
     app.run_polling()
@@ -332,4 +394,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
