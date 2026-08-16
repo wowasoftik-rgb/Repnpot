@@ -13,7 +13,7 @@ from telegram.ext import (
     filters,
 )
 
-BOT_TOKEN = "8976399480:AAGpIrkKcLUfy5aBUHh8TMYLK2vm5kl0K1M"
+BOT_TOKEN = "ВСТАВЬ_СЮДА_СВОЙ_ТОКЕН"
 DB_PATH = "reputation.db"
 
 # Юзернейм бота без @ — нужен для кнопки "Добавить в свой чат".
@@ -44,7 +44,9 @@ def init_db():
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
             username TEXT,
-            full_name TEXT
+            full_name TEXT,
+            first_seen TEXT,
+            started_at TEXT
         )
     """)
     conn.execute("""
@@ -59,6 +61,13 @@ def init_db():
             ts TEXT
         )
     """)
+    # На случай если бот уже был запущен раньше со старой схемой users —
+    # добавляем недостающие колонки, не трогая данные.
+    existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(users)").fetchall()}
+    if "first_seen" not in existing_cols:
+        conn.execute("ALTER TABLE users ADD COLUMN first_seen TEXT")
+    if "started_at" not in existing_cols:
+        conn.execute("ALTER TABLE users ADD COLUMN started_at TEXT")
     conn.commit()
     conn.close()
 
@@ -68,12 +77,35 @@ def save_user(user):
         return
     conn = db()
     conn.execute(
-        "INSERT INTO users (user_id, username, full_name) VALUES (?, ?, ?) "
+        "INSERT INTO users (user_id, username, full_name, first_seen) VALUES (?, ?, ?, ?) "
         "ON CONFLICT(user_id) DO UPDATE SET username=excluded.username, full_name=excluded.full_name",
-        (user.id, user.username, user.full_name)
+        (user.id, user.username, user.full_name, datetime.utcnow().isoformat())
     )
     conn.commit()
     conn.close()
+
+
+def mark_started(user_id):
+    """Фиксирует момент первого /start — не перезаписывает, если уже был установлен."""
+    conn = db()
+    conn.execute(
+        "UPDATE users SET started_at = COALESCE(started_at, ?) WHERE user_id = ?",
+        (datetime.utcnow().isoformat(), user_id)
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_user_record(user_id=None, username=None):
+    conn = db()
+    if user_id:
+        row = conn.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)).fetchone()
+    elif username:
+        row = conn.execute("SELECT * FROM users WHERE username = ? COLLATE NOCASE", (username,)).fetchone()
+    else:
+        row = None
+    conn.close()
+    return row
 
 
 def save_reputation(chat_id, from_user_id, to_user_id, to_username, score, review):
@@ -93,35 +125,54 @@ def star_bar(score):
     return "⭐" * full + "☆" * (5 - full)
 
 
+RU_MONTHS = [
+    "января", "февраля", "марта", "апреля", "мая", "июня",
+    "июля", "августа", "сентября", "октября", "ноября", "декабря",
+]
+
+
+def format_ru_date(iso_str):
+    dt = datetime.fromisoformat(iso_str)
+    return f"{dt.day} {RU_MONTHS[dt.month - 1]} {dt.year} года"
+
+
 def format_reputation(to_user_id, to_username, to_display):
-    """Собирает текст с репутацией человека — используется и в /и, и в кнопке Профиль."""
+    """Собирает карточку репутации человека — используется и в /и, и в кнопке Профиль."""
+    record = get_user_record(user_id=to_user_id, username=None if to_user_id else to_username)
+
+    if record:
+        display_id = record["user_id"]
+        name = record["full_name"] or to_display
+        join_iso = record["started_at"] or record["first_seen"]
+    else:
+        display_id = to_user_id
+        name = to_display
+        join_iso = None
+
     conn = db()
     if to_user_id:
         rows = conn.execute(
-            "SELECT score, review, ts FROM reputation WHERE to_user_id = ? ORDER BY ts DESC",
-            (to_user_id,)
+            "SELECT score FROM reputation WHERE to_user_id = ?", (to_user_id,)
         ).fetchall()
     else:
         rows = conn.execute(
-            "SELECT score, review, ts FROM reputation WHERE to_username = ? COLLATE NOCASE ORDER BY ts DESC",
-            (to_username,)
+            "SELECT score FROM reputation WHERE to_username = ? COLLATE NOCASE", (to_username,)
         ).fetchall()
     conn.close()
 
-    if not rows:
-        return f"У {to_display} пока нет отзывов."
+    count = len(rows)
+    plus = sum(1 for r in rows if r["score"] >= 3)
+    minus = sum(1 for r in rows if r["score"] < 3)
 
-    avg = sum(r['score'] for r in rows) / len(rows)
-    text = (
-        f"📊 Репутация {to_display}\n"
-        f"{star_bar(avg)}  {avg:.1f}/5  ({len(rows)} отзывов)\n\n"
-        f"Последние отзывы:\n"
-    )
-    for r in rows[:5]:
-        line = f"⭐ {r['score']}/5"
-        if r['review']:
-            line += f" — {r['review']}"
-        text += line + "\n"
+    id_part = f" [{display_id}]" if display_id else ""
+    text = f"🧑 {name}{id_part}\n\n"
+    text += f"🌟 Репутация ({count} отзывов)\n"
+    text += f"➕ {plus}\n"
+    text += f"➖ {minus}\n\n"
+    if join_iso:
+        text += f"⏰ В системе с {format_ru_date(join_iso)}"
+    else:
+        text += "⏰ В системе: пока не заходил(а) к боту"
     return text
 
 
@@ -152,6 +203,7 @@ def back_keyboard():
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_user(update.effective_user)
+    mark_started(update.effective_user.id)
     text = (
         "Привет! Я бот репутации 👋\n\n"
         "В группе пиши +реп в ответ на сообщение человека, чтобы оценить его.\n"
@@ -292,6 +344,7 @@ async def show_rep_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not m:
         return
 
+    save_user(update.effective_user)
     args_str = (m.group(1) or "").strip()
 
     to_user_id = None
@@ -394,3 +447,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
