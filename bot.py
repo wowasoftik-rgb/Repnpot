@@ -16,6 +16,10 @@ from telegram.ext import (
 BOT_TOKEN = "8976399480:AAGpIrkKcLUfy5aBUHh8TMYLK2vm5kl0K1M"
 DB_PATH = "reputation.db"
 
+# Telegram ID админов, которым можно ставить репутацию без ограничений.
+# Узнать свой ID можно командой /myid в этом боте.
+ADMIN_IDS = {8673321126}
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -251,10 +255,75 @@ async def show_rep(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await message.reply_text(text)
 
 
+async def myid(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показывает Telegram ID пользователя — чтобы добавить себя в ADMIN_IDS."""
+    await update.effective_message.reply_text(f"Твой Telegram ID: {update.effective_user.id}")
+
+
+async def admin_setrep(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/addrep — только для админов. Ставит любую оценку любому человеку,
+    без ограничения 1-5 и без запрета на себя.
+    Использование:
+      ответом на сообщение: /addrep 100 текст отзыва
+      или по нику:          /addrep @username 100 текст отзыва
+    """
+    message = update.effective_message
+    user = update.effective_user
+
+    if user.id not in ADMIN_IDS:
+        await message.reply_text("Эта команда только для админов.")
+        return
+
+    args = list(context.args)
+
+    to_user_id = None
+    to_username = None
+    to_display = None
+
+    if message.reply_to_message and message.reply_to_message.from_user:
+        target = message.reply_to_message.from_user
+        to_user_id = target.id
+        to_username = target.username
+        to_display = target.full_name
+        save_user(target)
+    elif args and args[0].startswith('@'):
+        to_username = args[0].lstrip('@')
+        to_display = f"@{to_username}"
+        args = args[1:]
+    else:
+        await message.reply_text(
+            "Использование:\n"
+            "Ответом на сообщение: /addrep 100 текст отзыва\n"
+            "Или по нику: /addrep @username 100 текст отзыва"
+        )
+        return
+
+    if not args:
+        await message.reply_text("Не указана оценка. Пример: /addrep 100 текст отзыва")
+        return
+
+    try:
+        score = int(args[0])
+    except ValueError:
+        await message.reply_text("Оценка должна быть числом (можно любым, хоть отрицательным).")
+        return
+
+    review = " ".join(args[1:])
+
+    save_reputation(message.chat_id, user.id, to_user_id, to_username, score, review)
+
+    reply = f"👑 (админ) Репутация {to_display} изменена: {score}"
+    if review:
+        reply += f"\n«{review}»"
+    await message.reply_text(reply)
+
+
 def main():
     init_db()
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("rep", show_rep))
+    app.add_handler(CommandHandler("addrep", admin_setrep))
+    app.add_handler(CommandHandler("myid", myid))
     app.add_handler(CallbackQueryHandler(rep_callback, pattern=r"^rep\|"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     logger.info("Бот запущен")
@@ -263,3 +332,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
